@@ -103,6 +103,57 @@ upf_gtpu_signalling_msg (gtpu_header_t *gtpu, u32 *error)
     }
 }
 
+static bool
+upf_gtpu_handle_ext_hdrs_slow (gtpu_ext_header_t * ext, u8 *buffer_end,
+			       u32 *gtpu_hdr_len);
+
+/* Return the whole gtpu header length in *GTPU_HDR_LEN.
+
+   If we have an invalid ext. header length or if we overflow the buffer
+   according to BUFFER_END, return false. In this case, modify *GTPU_HDR_LEN to
+   an invalid value. Otherwise, if the gtpu ext. headers have valid lengths,
+   return true. */
+static inline bool
+upf_gtpu_handle_ext_hdrs (gtpu_header_t * gtpu, u8 *buffer_end,
+			  u32 *gtpu_hdr_len)
+{
+  *gtpu_hdr_len = sizeof (gtpu_header_t) - 4;
+
+  if (PREDICT_TRUE ((gtpu->ver_flags & GTPU_E_S_PN_BIT) == 0))
+    return (u8 *)gtpu + *gtpu_hdr_len < buffer_end;
+
+  *gtpu_hdr_len = sizeof (gtpu_header_t);
+
+  if (PREDICT_FALSE (gtpu->ver_flags & GTPU_E_BIT) == 0)
+    return (u8 *)gtpu + *gtpu_hdr_len < buffer_end;
+
+  return upf_gtpu_handle_ext_hdrs_slow((void *) &gtpu->next_ext_type, buffer_end, gtpu_hdr_len);
+}
+
+static bool
+upf_gtpu_handle_ext_hdrs_slow (gtpu_ext_header_t * ext, u8 *buffer_end,
+			       u32 *gtpu_hdr_len)
+{
+  while (1)
+    {
+      if ((u8 *)ext >= buffer_end)
+	return false;
+
+      if (ext->type == 0)
+	return true;
+
+      if ((u8 *)&ext->len >= buffer_end)
+	return false;
+
+      if (ext->len == 0)
+	return false;
+
+      /* gtpu_ext_header_t is 4 bytes and the len is in units of 4 */
+      *gtpu_hdr_len += ext->len * 4;
+      ext += ext->len * 4 / sizeof (*ext);
+    }
+}
+
 always_inline uword
 upf_gtpu_input (vlib_main_t *vm, vlib_node_runtime_t *node,
                 vlib_frame_t *from_frame, u8 is_ip4)
@@ -315,35 +366,12 @@ upf_gtpu_input (vlib_main_t *vm, vlib_node_runtime_t *node,
 
         next0:
           /* Manipulate gtpu header */
-          if (PREDICT_FALSE ((gtpu0->ver_flags & GTPU_E_S_PN_BIT) != 0))
+          if (!upf_gtpu_handle_ext_hdrs(gtpu0, vlib_buffer_get_tail (b0),
+                                        &gtpu_hdr_len0))
             {
-              gtpu_hdr_len0 = sizeof (gtpu_header_t);
-
-              if (PREDICT_FALSE ((gtpu0->ver_flags & GTPU_E_BIT) != 0))
-                {
-                  gtpu_ext_header_t *ext =
-                    (gtpu_ext_header_t *) &gtpu0->next_ext_type;
-                  u8 *end = vlib_buffer_get_tail (b0);
-
-                  while ((u8 *) ext < end && ext->type != 0)
-                    {
-                      if (PREDICT_FALSE (!ext->len))
-                        {
-                          error0 = UPF_GTPU_ERROR_LENGTH_ERROR;
-                          next0 = UPF_GTPU_INPUT_NEXT_DROP;
-                          goto trace0;
-                        }
-
-                      /* gtpu_ext_header_t is 4 bytes and the len is in units
-                       * of 4 */
-                      gtpu_hdr_len0 += ext->len * 4;
-                      ext += ext->len * 4 / sizeof (*ext);
-                    }
-                }
-            }
-          else
-            {
-              gtpu_hdr_len0 = sizeof (gtpu_header_t) - 4;
+              error0 = UPF_GTPU_ERROR_LENGTH_ERROR;
+              next0 = UPF_GTPU_INPUT_NEXT_DROP;
+              goto trace0;
             }
 
           hdr_len0 += gtpu_hdr_len0;
@@ -501,35 +529,12 @@ upf_gtpu_input (vlib_main_t *vm, vlib_node_runtime_t *node,
 
         next1:
           /* Manipulate gtpu header */
-          if (PREDICT_FALSE ((gtpu1->ver_flags & GTPU_E_S_PN_BIT) != 0))
+          if (!upf_gtpu_handle_ext_hdrs(gtpu1, vlib_buffer_get_tail (b1),
+                                        &gtpu_hdr_len1))
             {
-              gtpu_hdr_len1 = sizeof (gtpu_header_t);
-
-              if (PREDICT_FALSE ((gtpu1->ver_flags & GTPU_E_BIT) != 0))
-                {
-                  gtpu_ext_header_t *ext =
-                    (gtpu_ext_header_t *) &gtpu1->next_ext_type;
-                  u8 *end = vlib_buffer_get_tail (b1);
-
-                  while ((u8 *) ext < end && ext->type != 0)
-                    {
-                      if (PREDICT_FALSE (!ext->len))
-                        {
-                          error1 = UPF_GTPU_ERROR_LENGTH_ERROR;
-                          next1 = UPF_GTPU_INPUT_NEXT_DROP;
-                          goto trace1;
-                        }
-
-                      /* gtpu_ext_header_t is 4 bytes and the len is in units
-                       * of 4 */
-                      gtpu_hdr_len1 += ext->len * 4;
-                      ext += ext->len * 4 / sizeof (*ext);
-                    }
-                }
-            }
-          else
-            {
-              gtpu_hdr_len1 = sizeof (gtpu_header_t) - 4;
+              error1 = UPF_GTPU_ERROR_LENGTH_ERROR;
+              next1 = UPF_GTPU_INPUT_NEXT_DROP;
+              goto trace1;
             }
 
           hdr_len1 += gtpu_hdr_len1;
@@ -739,35 +744,12 @@ upf_gtpu_input (vlib_main_t *vm, vlib_node_runtime_t *node,
 
         next00:
           /* Manipulate gtpu header */
-          if (PREDICT_FALSE ((gtpu0->ver_flags & GTPU_E_S_PN_BIT) != 0))
+          if (!upf_gtpu_handle_ext_hdrs(gtpu0, vlib_buffer_get_tail (b0),
+                                        &gtpu_hdr_len0))
             {
-              gtpu_hdr_len0 = sizeof (gtpu_header_t);
-
-              if (PREDICT_FALSE ((gtpu0->ver_flags & GTPU_E_BIT) != 0))
-                {
-                  gtpu_ext_header_t *ext =
-                    (gtpu_ext_header_t *) &gtpu0->next_ext_type;
-                  u8 *end = vlib_buffer_get_tail (b0);
-
-                  while ((u8 *) ext < end && ext->type != 0)
-                    {
-                      if (PREDICT_FALSE (!ext->len))
-                        {
-                          error0 = UPF_GTPU_ERROR_LENGTH_ERROR;
-                          next0 = UPF_GTPU_INPUT_NEXT_DROP;
-                          goto trace00;
-                        }
-
-                      /* gtpu_ext_header_t is 4 bytes and the len is in units
-                       * of 4 */
-                      gtpu_hdr_len0 += ext->len * 4;
-                      ext += ext->len * 4 / sizeof (*ext);
-                    }
-                }
-            }
-          else
-            {
-              gtpu_hdr_len0 = sizeof (gtpu_header_t) - 4;
+              error0 = UPF_GTPU_ERROR_LENGTH_ERROR;
+              next0 = UPF_GTPU_INPUT_NEXT_DROP;
+              goto trace00;
             }
 
           hdr_len0 += gtpu_hdr_len0;
