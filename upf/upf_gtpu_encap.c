@@ -432,6 +432,7 @@ upf_encap_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
   upf_far_t *far0 = NULL, *far1 = NULL, *far2 = NULL, *far3 = NULL;
   upf_peer_t *peer0 = NULL, *peer1 = NULL, *peer2 = NULL, *peer3 = NULL;
 
+  int const ip_hdr_size = is_ip4 ? sizeof(ip4_header_t) : sizeof(ip6_header_t);
   u32 const csum_mask =
     (VNET_BUFFER_OFFLOAD_F_TCP_CKSUM | VNET_BUFFER_OFFLOAD_F_UDP_CKSUM |
      (is_ip4 ? VNET_BUFFER_OFFLOAD_F_IP_CKSUM : 0));
@@ -654,62 +655,21 @@ upf_encap_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
               ip4_3->checksum = ip_csum_fold (sum3);
               ip4_3->length = new_l3;
 
-              /* Fix UDP length and set source port */
               udp0 = (udp_header_t *) (ip4_0 + 1);
-              new_l0 = clib_host_to_net_u16 (
+              udp0->length = clib_host_to_net_u16 (
                 vlib_buffer_length_in_chain (vm, b0) - sizeof (*ip4_0));
-              udp0->length = new_l0;
-              udp0->src_port = flow_hash0;
               udp1 = (udp_header_t *) (ip4_1 + 1);
-              new_l1 = clib_host_to_net_u16 (
+              udp1->length = clib_host_to_net_u16 (
                 vlib_buffer_length_in_chain (vm, b1) - sizeof (*ip4_1));
-              udp1->length = new_l1;
-              udp1->src_port = flow_hash1;
               udp2 = (udp_header_t *) (ip4_2 + 1);
-              new_l2 = clib_host_to_net_u16 (
+              udp2->length = clib_host_to_net_u16 (
                 vlib_buffer_length_in_chain (vm, b2) - sizeof (*ip4_2));
-              udp2->length = new_l2;
-              udp2->src_port = flow_hash2;
               udp3 = (udp_header_t *) (ip4_3 + 1);
-              new_l3 = clib_host_to_net_u16 (
+              udp3->length = clib_host_to_net_u16 (
                 vlib_buffer_length_in_chain (vm, b3) - sizeof (*ip4_3));
-              udp3->length = new_l3;
-              udp3->src_port = flow_hash3;
-
-              /* Fix GTPU length */
-              gtpu0 = (gtpu_header_t *) (udp0 + 1);
-              new_l0 = clib_host_to_net_u16 (
-                vlib_buffer_length_in_chain (vm, b0) - sizeof (*ip4_0) -
-                sizeof (*udp0) - GTPU_V1_HDR_LEN);
-              gtpu0->length = new_l0;
-              gtpu0->ver_flags |=
-                (upf_buffer_opaque (b0)->gtpu.hdr_flags & GTPU_E_S_PN_BIT);
-              gtpu1 = (gtpu_header_t *) (udp1 + 1);
-              new_l1 = clib_host_to_net_u16 (
-                vlib_buffer_length_in_chain (vm, b1) - sizeof (*ip4_1) -
-                sizeof (*udp1) - GTPU_V1_HDR_LEN);
-              gtpu1->length = new_l1;
-              gtpu1->ver_flags |=
-                (upf_buffer_opaque (b1)->gtpu.hdr_flags & GTPU_E_S_PN_BIT);
-              gtpu2 = (gtpu_header_t *) (udp2 + 1);
-              new_l2 = clib_host_to_net_u16 (
-                vlib_buffer_length_in_chain (vm, b2) - sizeof (*ip4_2) -
-                sizeof (*udp2) - GTPU_V1_HDR_LEN);
-              gtpu2->length = new_l2;
-              gtpu2->ver_flags |=
-                (upf_buffer_opaque (b2)->gtpu.hdr_flags & GTPU_E_S_PN_BIT);
-              gtpu3 = (gtpu_header_t *) (udp3 + 1);
-              new_l3 = clib_host_to_net_u16 (
-                vlib_buffer_length_in_chain (vm, b3) - sizeof (*ip4_3) -
-                sizeof (*udp3) - GTPU_V1_HDR_LEN);
-              gtpu3->length = new_l3;
-              gtpu3->ver_flags |=
-                (upf_buffer_opaque (b3)->gtpu.hdr_flags & GTPU_E_S_PN_BIT);
             }
           else /* ipv6 */
             {
-              int bogus = 0;
-
               ip6_0 = vlib_buffer_get_current (b0);
               ip6_1 = vlib_buffer_get_current (b1);
               ip6_2 = vlib_buffer_get_current (b2);
@@ -754,46 +714,49 @@ upf_encap_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
               /* Fix UDP length  and set source port */
               udp0 = (udp_header_t *) (ip6_0 + 1);
               udp0->length = new_l0;
-              udp0->src_port = flow_hash0;
               udp1 = (udp_header_t *) (ip6_1 + 1);
               udp1->length = new_l1;
-              udp1->src_port = flow_hash1;
               udp2 = (udp_header_t *) (ip6_2 + 1);
               udp2->length = new_l2;
-              udp2->src_port = flow_hash2;
               udp3 = (udp_header_t *) (ip6_3 + 1);
               udp3->length = new_l3;
-              udp3->src_port = flow_hash3;
+            }
 
-              /* Fix GTPU length */
-              gtpu0 = (gtpu_header_t *) (udp0 + 1);
-              new_l0 = clib_host_to_net_u16 (
-                vlib_buffer_length_in_chain (vm, b0) - sizeof (*ip6_0) -
-                sizeof (*udp0) - GTPU_V1_HDR_LEN);
-              gtpu0->length = new_l0;
-              gtpu0->ver_flags |=
-                (upf_buffer_opaque (b0)->gtpu.hdr_flags & GTPU_E_S_PN_BIT);
-              gtpu1 = (gtpu_header_t *) (udp1 + 1);
-              new_l1 = clib_host_to_net_u16 (
-                vlib_buffer_length_in_chain (vm, b1) - sizeof (*ip6_1) -
-                sizeof (*udp1) - GTPU_V1_HDR_LEN);
-              gtpu1->length = new_l1;
-              gtpu1->ver_flags |=
-                (upf_buffer_opaque (b1)->gtpu.hdr_flags & GTPU_E_S_PN_BIT);
-              gtpu2 = (gtpu_header_t *) (udp2 + 1);
-              new_l2 = clib_host_to_net_u16 (
-                vlib_buffer_length_in_chain (vm, b2) - sizeof (*ip6_2) -
-                sizeof (*udp2) - GTPU_V1_HDR_LEN);
-              gtpu2->length = new_l2;
-              gtpu2->ver_flags |=
-                (upf_buffer_opaque (b2)->gtpu.hdr_flags & GTPU_E_S_PN_BIT);
-              gtpu3 = (gtpu_header_t *) (udp3 + 1);
-              new_l3 = clib_host_to_net_u16 (
-                vlib_buffer_length_in_chain (vm, b3) - sizeof (*ip6_3) -
-                sizeof (*udp3) - GTPU_V1_HDR_LEN);
-              gtpu3->length = new_l3;
-              gtpu3->ver_flags |=
-                (upf_buffer_opaque (b3)->gtpu.hdr_flags & GTPU_E_S_PN_BIT);
+          /* Set UDP source port */
+          udp0->src_port = flow_hash0;
+          udp1->src_port = flow_hash1;
+          udp2->src_port = flow_hash2;
+          udp3->src_port = flow_hash3;
+
+          /* Fix GTPU length */
+          gtpu0 = (gtpu_header_t *) (udp0 + 1);
+          gtpu0->length = clib_host_to_net_u16 (
+            vlib_buffer_length_in_chain (vm, b0) - ip_hdr_size -
+            sizeof (*udp0) - GTPU_V1_HDR_LEN);
+          gtpu0->ver_flags |=
+            (upf_buffer_opaque (b0)->gtpu.hdr_flags & GTPU_E_S_PN_BIT);
+          gtpu1 = (gtpu_header_t *) (udp1 + 1);
+          gtpu1->length = clib_host_to_net_u16 (
+            vlib_buffer_length_in_chain (vm, b1) - ip_hdr_size -
+            sizeof (*udp1) - GTPU_V1_HDR_LEN);
+          gtpu1->ver_flags |=
+            (upf_buffer_opaque (b1)->gtpu.hdr_flags & GTPU_E_S_PN_BIT);
+          gtpu2 = (gtpu_header_t *) (udp2 + 1);
+          gtpu2->length = clib_host_to_net_u16 (
+            vlib_buffer_length_in_chain (vm, b2) - ip_hdr_size -
+            sizeof (*udp2) - GTPU_V1_HDR_LEN);
+          gtpu2->ver_flags |=
+            (upf_buffer_opaque (b2)->gtpu.hdr_flags & GTPU_E_S_PN_BIT);
+          gtpu3 = (gtpu_header_t *) (udp3 + 1);
+          gtpu3->length = clib_host_to_net_u16 (
+            vlib_buffer_length_in_chain (vm, b3) - ip_hdr_size -
+            sizeof (*udp3) - GTPU_V1_HDR_LEN);
+          gtpu3->ver_flags |=
+            (upf_buffer_opaque (b3)->gtpu.hdr_flags & GTPU_E_S_PN_BIT);
+
+          if (!is_ip4)
+            {
+              int bogus = 0;
 
               /* IPv6 UDP checksum is mandatory */
               udp0->checksum =
@@ -940,27 +903,13 @@ upf_encap_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
               ip4_0->checksum = ip_csum_fold (sum0);
               ip4_0->length = new_l0;
 
-              /* Fix UDP length and set source port */
               udp0 = (udp_header_t *) (ip4_0 + 1);
-              new_l0 = clib_host_to_net_u16 (
+              udp0->length = clib_host_to_net_u16 (
                 vlib_buffer_length_in_chain (vm, b0) - sizeof (*ip4_0));
-              udp0->length = new_l0;
-              udp0->src_port = flow_hash0;
-
-              /* Fix GTPU length */
-              gtpu0 = (gtpu_header_t *) (udp0 + 1);
-              new_l0 = clib_host_to_net_u16 (
-                vlib_buffer_length_in_chain (vm, b0) - sizeof (*ip4_0) -
-                sizeof (*udp0) - GTPU_V1_HDR_LEN);
-              gtpu0->length = new_l0;
-              gtpu0->ver_flags |=
-                (upf_buffer_opaque (b0)->gtpu.hdr_flags & GTPU_E_S_PN_BIT);
             }
 
           else /* ip6 path */
             {
-              int bogus = 0;
-
               ip6_0 = vlib_buffer_get_current (b0);
               /* Copy the fixed header */
               copy_dst0 = (u64 *) ip6_0;
@@ -974,19 +923,24 @@ upf_encap_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
                 vlib_buffer_length_in_chain (vm, b0) - sizeof (*ip6_0));
               ip6_0->payload_length = new_l0;
 
-              /* Fix UDP length  and set source port */
               udp0 = (udp_header_t *) (ip6_0 + 1);
               udp0->length = new_l0;
-              udp0->src_port = flow_hash0;
+            }
 
-              /* Fix GTPU length */
-              gtpu0 = (gtpu_header_t *) (udp0 + 1);
-              new_l0 = clib_host_to_net_u16 (
-                vlib_buffer_length_in_chain (vm, b0) - sizeof (*ip6_0) -
-                sizeof (*udp0) - GTPU_V1_HDR_LEN);
-              gtpu0->length = new_l0;
-              gtpu0->ver_flags |=
-                (upf_buffer_opaque (b0)->gtpu.hdr_flags & GTPU_E_S_PN_BIT);
+          /* Set UDP source port */
+          udp0->src_port = flow_hash0;
+
+          /* Fix GTPU length */
+          gtpu0 = (gtpu_header_t *) (udp0 + 1);
+          gtpu0->length = clib_host_to_net_u16 (
+            vlib_buffer_length_in_chain (vm, b0) - ip_hdr_size -
+            sizeof (*udp0) - GTPU_V1_HDR_LEN);
+          gtpu0->ver_flags |=
+            (upf_buffer_opaque (b0)->gtpu.hdr_flags & GTPU_E_S_PN_BIT);
+
+          if (!is_ip4)
+            {
+              int bogus = 0;
 
               /* IPv6 UDP checksum is mandatory */
               udp0->checksum =
