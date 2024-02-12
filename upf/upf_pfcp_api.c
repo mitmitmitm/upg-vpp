@@ -925,6 +925,9 @@ handle_create_pdr (upf_session_t *sx, pfcp_ie_create_pdr_t *create_pdr,
             }
         }
 
+      if (ISSET_BIT (pdr->pdi.grp.fields, PDI_QFI))
+        create->pdi.qfis = vec_dup (pdr->pdi.qfi);
+
       if (ISSET_BIT (pdr->pdi.grp.fields, PDI_SDF_FILTER))
         {
           pfcp_ie_sdf_filter_t *sdf;
@@ -1110,6 +1113,12 @@ handle_update_pdr (upf_session_t *sx, pfcp_ie_update_pdr_t *update_pdr,
               vec_reset_length (update->pdi.acl);
               vec_add1 (update->pdi.acl, wildcard_acl);
             }
+        }
+
+      if (ISSET_BIT (pdr->pdi.grp.fields, PDI_QFI))
+        {
+          vec_free (update->pdi.qfis);
+          update->pdi.qfis = vec_dup (pdr->pdi.qfi);
         }
 
       if (ISSET_BIT (pdr->pdi.grp.fields, PDI_SDF_FILTER))
@@ -2118,10 +2127,14 @@ handle_create_qer (upf_session_t *sx, pfcp_ie_create_qer_t *create_qer,
           create->mbr = qer->mbr;
         }
 
+      if (ISSET_BIT (qer->grp.fields, CREATE_QER_QOS_FLOW_IDENTIFIER))
+        create->qfi = qer->qos_flow_identifier & GTPU_PDU_CONT_QFI_MASK;
+      else
+        create->qfi = ~0;
+
       // TODO: gbr;
       // TODO: packet_rate;
       // TODO: dl_flow_level_marking;
-      // TODO: qos_flow_identifier;
       // TODO: reflective_qos;
     }
 
@@ -2172,10 +2185,12 @@ handle_update_qer (upf_session_t *sx, pfcp_ie_update_qer_t *update_qer,
           update->mbr = qer->mbr;
         }
 
+      if (ISSET_BIT (qer->grp.fields, UPDATE_QER_QOS_FLOW_IDENTIFIER))
+        update->qfi = qer->qos_flow_identifier & GTPU_PDU_CONT_QFI_MASK;
+
       // TODO: gbr;
       // TODO: packet_rate;
       // TODO: dl_flow_level_marking;
-      // TODO: qos_flow_identifier;
       // TODO: reflective_qos;
     }
 
@@ -2625,6 +2640,9 @@ handle_session_establishment_request (pfcp_msg_t *msg,
     goto out_send_resp;
 
   if ((r = handle_create_urr (sess, req->create_urr, now, resp)) != 0)
+    goto out_send_resp;
+
+  if ((r = handle_create_qer (sess, req->create_qer, now, resp)) != 0)
     goto out_send_resp;
 
   r = pfcp_update_apply (sess);

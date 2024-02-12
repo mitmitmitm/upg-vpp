@@ -48,6 +48,7 @@ typedef struct
   u32 session_index;
   u32 error;
   u32 teid;
+  u8 qfi;
 } gtpu_rx_trace_t;
 
 static u8 *
@@ -68,8 +69,8 @@ format_gtpu_rx_trace (u8 *s, va_list *args)
   else if (t->session_index != ~0)
     {
       s = format (
-        s, "GTPU decap from gtpu_session%d teid 0x%08x next %d error %d",
-        t->session_index, t->teid, t->next_index, t->error);
+        s, "GTPU decap from gtpu_session%d teid 0x%08x qfi %d next %d error %d",
+        t->session_index, t->teid, t->qfi, t->next_index, t->error);
     }
   else
     {
@@ -107,16 +108,19 @@ static bool
 upf_gtpu_handle_ext_hdrs_slow (gtpu_ext_header_t * ext, u8 *buffer_end,
 			       u32 *gtpu_hdr_len);
 
-/* Return the whole gtpu header length in *GTPU_HDR_LEN.
+/* Return the whole gtpu header length in *GTPU_HDR_LEN and the QoS Flow
+   Identifier in *QFI. Set *QFI to ~0 if QFI isn't specified in ext.
+   headers.
 
    If we have an invalid ext. header length or if we overflow the buffer
-   according to BUFFER_END, return false. In this case, modify *GTPU_HDR_LEN to
-   an invalid value. Otherwise, if the gtpu ext. headers have valid lengths,
-   return true. */
+   according to BUFFER_END, return false. In this case, modify *QFI and
+   *GTPU_HDR_LEN to invalid values. Otherwise, if the gtpu ext. headers have
+   valid lengths, return true. */
 static inline bool
 upf_gtpu_handle_ext_hdrs (gtpu_header_t * gtpu, u8 *buffer_end,
-			  u32 *gtpu_hdr_len)
+			  u32 *gtpu_hdr_len, u8 *qfi)
 {
+  *qfi = ~0;
   *gtpu_hdr_len = sizeof (gtpu_header_t) - 4;
 
   if (PREDICT_TRUE ((gtpu->ver_flags & GTPU_E_S_PN_BIT) == 0))
@@ -127,7 +131,37 @@ upf_gtpu_handle_ext_hdrs (gtpu_header_t * gtpu, u8 *buffer_end,
   if (PREDICT_FALSE (gtpu->ver_flags & GTPU_E_BIT) == 0)
     return (u8 *)gtpu + *gtpu_hdr_len < buffer_end;
 
-  return upf_gtpu_handle_ext_hdrs_slow((void *) &gtpu->next_ext_type, buffer_end, gtpu_hdr_len);
+  /* TS 29.281 - 5.2.2 Extension Header types (20)
+
+     NOTE 4: For a GTP-PDU with several Extension Headers, the PDU Session
+     Container should be the first Extension Header.
+
+     Here we implement a fast path for the case of a single extension header of
+     type PDU Session Container. */
+  gtpu_ext_pdu_container_t *ext_hdr =
+    (gtpu_ext_pdu_container_t *) (gtpu + 1);
+  gtpu_ext_header_t *next_ext_hdr;
+
+  if (PREDICT_TRUE ((u8 *)(ext_hdr + 1) <= buffer_end &&
+		    gtpu->next_ext_type == GTPU_EXT_H_TYPE_PDU_CONT))
+    {
+      if (PREDICT_FALSE (ext_hdr->len != 1))
+	return false;
+
+      *gtpu_hdr_len += 4;
+      *qfi = ext_hdr->qfi & GTPU_PDU_CONT_QFI_MASK;
+
+      if (PREDICT_TRUE (ext_hdr->next_ext_type == 0))
+	return true;
+
+      next_ext_hdr = (void *)&ext_hdr->next_ext_type;
+    }
+  else
+    {
+      next_ext_hdr = (void *)&gtpu->next_ext_type;
+    }
+
+  return upf_gtpu_handle_ext_hdrs_slow(next_ext_hdr, buffer_end, gtpu_hdr_len);
 }
 
 static bool
@@ -190,6 +224,7 @@ upf_gtpu_input (vlib_main_t *vm, vlib_node_runtime_t *node,
           ip6_header_t *ip6_0, *ip6_1;
           gtpu_header_t *gtpu0, *gtpu1;
           u32 gtpu_hdr_len0 = 0, gtpu_hdr_len1 = 0;
+          u8 qfi0 = ~0, qfi1 = ~0;
           u32 session_index0, session_index1;
           u32 rule_index0, rule_index1;
           upf_session_t *t0, *t1;
@@ -367,7 +402,7 @@ upf_gtpu_input (vlib_main_t *vm, vlib_node_runtime_t *node,
         next0:
           /* Manipulate gtpu header */
           if (!upf_gtpu_handle_ext_hdrs(gtpu0, vlib_buffer_get_tail (b0),
-                                        &gtpu_hdr_len0))
+                                        &gtpu_hdr_len0, &qfi0))
             {
               error0 = UPF_GTPU_ERROR_LENGTH_ERROR;
               next0 = UPF_GTPU_INPUT_NEXT_DROP;
@@ -382,6 +417,8 @@ upf_gtpu_input (vlib_main_t *vm, vlib_node_runtime_t *node,
           upf_buffer_opaque (b0)->gtpu.hdr_flags = gtpu0->ver_flags;
           upf_buffer_opaque (b0)->gtpu.teid =
             clib_net_to_host_u32 (gtpu0->teid);
+	  upf_buffer_opaque (b0)->gtpu.qfi_hdr_present = qfi0 != (u8)~0;
+	  upf_buffer_opaque (b0)->gtpu.qfi = qfi0;
           upf_buffer_opaque (b0)->gtpu.pdr_idx =
             !(pfcp_get_rules (t0, PFCP_ACTIVE)->flags & PFCP_CLASSIFY) ?
               rule_index0 :
@@ -420,6 +457,7 @@ upf_gtpu_input (vlib_main_t *vm, vlib_node_runtime_t *node,
               tr->error = error0;
               tr->session_index = session_index0;
               tr->teid = clib_net_to_host_u32 (gtpu0->teid);
+              tr->qfi = qfi0;
             }
 
           if (PREDICT_FALSE ((gtpu1->ver_flags & GTPU_VER_MASK) !=
@@ -530,7 +568,7 @@ upf_gtpu_input (vlib_main_t *vm, vlib_node_runtime_t *node,
         next1:
           /* Manipulate gtpu header */
           if (!upf_gtpu_handle_ext_hdrs(gtpu1, vlib_buffer_get_tail (b1),
-                                        &gtpu_hdr_len1))
+                                        &gtpu_hdr_len1, &qfi1))
             {
               error1 = UPF_GTPU_ERROR_LENGTH_ERROR;
               next1 = UPF_GTPU_INPUT_NEXT_DROP;
@@ -545,6 +583,8 @@ upf_gtpu_input (vlib_main_t *vm, vlib_node_runtime_t *node,
           upf_buffer_opaque (b1)->gtpu.hdr_flags = gtpu1->ver_flags;
           upf_buffer_opaque (b1)->gtpu.teid =
             clib_net_to_host_u32 (gtpu1->teid);
+	  upf_buffer_opaque (b1)->gtpu.qfi_hdr_present = qfi1 != (u8)~0;
+	  upf_buffer_opaque (b1)->gtpu.qfi = qfi1;
           upf_buffer_opaque (b1)->gtpu.pdr_idx =
             !(pfcp_get_rules (t1, PFCP_ACTIVE)->flags & PFCP_CLASSIFY) ?
               rule_index1 :
@@ -583,6 +623,7 @@ upf_gtpu_input (vlib_main_t *vm, vlib_node_runtime_t *node,
               tr->error = error1;
               tr->session_index = session_index1;
               tr->teid = clib_net_to_host_u32 (gtpu1->teid);
+              tr->qfi = qfi1;
             }
 
           vlib_validate_buffer_enqueue_x2 (vm, node, next_index, to_next,
@@ -599,6 +640,7 @@ upf_gtpu_input (vlib_main_t *vm, vlib_node_runtime_t *node,
           ip6_header_t *ip6_0;
           gtpu_header_t *gtpu0;
           u32 gtpu_hdr_len0 = 0;
+          u8 qfi0 = ~0;
           u32 session_index0;
           u32 rule_index0;
           upf_session_t *t0;
@@ -745,7 +787,7 @@ upf_gtpu_input (vlib_main_t *vm, vlib_node_runtime_t *node,
         next00:
           /* Manipulate gtpu header */
           if (!upf_gtpu_handle_ext_hdrs(gtpu0, vlib_buffer_get_tail (b0),
-                                        &gtpu_hdr_len0))
+                                        &gtpu_hdr_len0, &qfi0))
             {
               error0 = UPF_GTPU_ERROR_LENGTH_ERROR;
               next0 = UPF_GTPU_INPUT_NEXT_DROP;
@@ -760,6 +802,8 @@ upf_gtpu_input (vlib_main_t *vm, vlib_node_runtime_t *node,
           upf_buffer_opaque (b0)->gtpu.hdr_flags = gtpu0->ver_flags;
           upf_buffer_opaque (b0)->gtpu.teid =
             clib_net_to_host_u32 (gtpu0->teid);
+	  upf_buffer_opaque (b0)->gtpu.qfi_hdr_present = qfi0 != (u8)~0;
+	  upf_buffer_opaque (b0)->gtpu.qfi = qfi0;
           upf_buffer_opaque (b0)->gtpu.pdr_idx =
             !(pfcp_get_rules (t0, PFCP_ACTIVE)->flags & PFCP_CLASSIFY) ?
               rule_index0 :
@@ -798,6 +842,7 @@ upf_gtpu_input (vlib_main_t *vm, vlib_node_runtime_t *node,
               tr->error = error0;
               tr->session_index = session_index0;
               tr->teid = clib_net_to_host_u32 (gtpu0->teid);
+              tr->qfi = qfi0;
             }
 
           vlib_validate_buffer_enqueue_x1 (vm, node, next_index, to_next,

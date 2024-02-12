@@ -26,18 +26,28 @@ typedef struct
 {
   struct
   {
-    u64 pad[1];
     u32 teid;
     u32 session_index;
     u16 ext_hdr_len;
     u16 data_offset; /* offset relative to ip hdr */
     u8 hdr_flags;
+    /* qfi_hdr_present: GTPU decap node sets this field to 1 if PDU extension
+       header is present. GTPU encap node uses this information in order to
+       insert a PDU ext. hdr. if required and if not yet present. */
+    u8 qfi_hdr_present:1;
+    /* qfi_present: Set, if GTPU encap should insert a QFI. */
+    u8 qfi_present:1;
+    /* qfi: GTPU decap node sets this field to GTPU QFI from PDU extension
+       header. UPF forward node sets this field to QER's QFI, if any. GTPU
+       encap node uses this field to set PDU ext. hdr. QFI field. */
+    u8 qfi:6;
     u8 flags;
     u8 flow_key_direction : 1; // flow_direction_op_t
     u8 direction : 1;          // flow_direction_t
     u8 is_proxied : 1;
     u32 pdr_idx;
     u32 flow_id;
+    u64 pad[1];
   } gtpu;
 } upf_buffer_opaque_t;
 
@@ -65,6 +75,9 @@ STATIC_ASSERT (sizeof (upf_buffer_opaque_t) <=
       clib_memset (upf_buffer_opaque (b), 0, sizeof (upf_buffer_opaque_t));   \
       b->flags |= UPF_BUFFER_F_GTPU_INITIALIZED;                              \
       upf_buffer_opaque (b)->gtpu.session_index = sidx;                       \
+      upf_buffer_opaque (b)->gtpu.qfi_hdr_present = 0;                        \
+      upf_buffer_opaque (b)->gtpu.qfi_present = 0;                            \
+      upf_buffer_opaque (b)->gtpu.qfi = ~0;                                   \
       upf_buffer_opaque (b)->gtpu.flags =                                     \
         is_ip4 ? BUFFER_GTP_UDP_IP4 : BUFFER_GTP_UDP_IP6;                     \
     }                                                                         \
@@ -79,6 +92,9 @@ STATIC_ASSERT (sizeof (upf_buffer_opaque_t) <=
     {                                                                         \
       clib_memset (upf_buffer_opaque (b), 0, sizeof (upf_buffer_opaque_t));   \
       upf_buffer_opaque (b)->gtpu.session_index = sidx;                       \
+      upf_buffer_opaque (b)->gtpu.qfi_hdr_present = 0;                        \
+      upf_buffer_opaque (b)->gtpu.qfi_present = 0;                            \
+      upf_buffer_opaque (b)->gtpu.qfi = ~0;                                   \
       upf_buffer_opaque (b)->gtpu.flags =                                     \
         is_ip4 ? BUFFER_GTP_UDP_IP4 : BUFFER_GTP_UDP_IP6;                     \
     }                                                                         \

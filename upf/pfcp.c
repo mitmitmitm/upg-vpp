@@ -5081,6 +5081,7 @@ static struct pfcp_group_ie_def pfcp_pdi_group[] =
     },
     [PDI_QFI] = {
       .type = PFCP_IE_QFI,
+      .is_array = true,
       .offset = offsetof(pfcp_ie_pdi_t, qfi)
     },
     [PDI_FRAMED_ROUTE] = {

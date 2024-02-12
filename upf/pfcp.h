@@ -1377,7 +1377,7 @@ typedef struct
   pfcp_ie_application_id_t application_id;
   pfcp_ie_ethernet_pdu_session_information_t ethernet_pdu_session_information;
   pfcp_ie_ethernet_packet_filter_t ethernet_packet_filter;
-  pfcp_ie_qfi_t qfi;
+  pfcp_ie_qfi_t *qfi;
   pfcp_ie_framed_route_t *framed_route;
   pfcp_ie_framed_routing_t framed_routing;
   pfcp_ie_framed_ipv6_route_t *framed_ipv6_route;

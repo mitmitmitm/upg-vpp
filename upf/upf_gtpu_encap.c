@@ -417,6 +417,48 @@ upf_gtpu_end_marker (u32 fib_index, u32 dpoi_index, u8 *rewrite, int is_ip4)
 
 #define foreach_fixed_header6_offset _ (0) _ (1) _ (2) _ (3) _ (4) _ (5) _ (6)
 
+always_inline void
+advance_for_qfi (vlib_buffer_t *b)
+{
+  if (!upf_buffer_opaque (b)->gtpu.qfi_present ||
+      upf_buffer_opaque (b)->gtpu.qfi_hdr_present)
+    return;
+
+  /* Add space for the extension header that contains QFI, if the header isn't
+     present already */
+  vlib_buffer_advance(b, -sizeof(gtpu_ext_pdu_container_t));
+
+  /* Add space for the SQN, N-PDU number and ext. header type if not already
+     present */
+  if (!(upf_buffer_opaque (b)->gtpu.hdr_flags & GTPU_E_S_PN_BIT))
+    vlib_buffer_advance (b, -4);
+}
+
+always_inline void
+write_qfi (gtpu_header_t *gtpu, vlib_buffer_t *b)
+{
+  gtpu_ext_pdu_container_t *ext_hdr = (void *)(gtpu + 1);
+
+  if (!upf_buffer_opaque (b)->gtpu.qfi_present)
+    return;
+
+  ext_hdr->qfi = upf_buffer_opaque (b)->gtpu.qfi;
+  if (upf_buffer_opaque (b)->gtpu.qfi_hdr_present)
+    return;
+  /* Write the static part of the ext. header containing QFI, if the ext.
+     header wasn't present originally */
+  gtpu->ver_flags &= ~GTPU_E_S_PN_BIT;
+  gtpu->ver_flags |= GTPU_E_BIT;
+  gtpu->sequence = 0;
+  gtpu->pdu_number = 0;
+  gtpu->next_ext_type = GTPU_EXT_H_TYPE_PDU_CONT;
+  ext_hdr->len = 1;
+  ext_hdr->pdu_type = GTPU_PDU_CONT_TYPE_DL;
+  /* Write the next ext. header type if this field wasn't present originally */
+  if (!(upf_buffer_opaque (b)->gtpu.hdr_flags & GTPU_E_S_PN_BIT))
+    ext_hdr->next_ext_type = 0;
+}
+
 always_inline uword
 upf_encap_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
                   vlib_frame_t *from_frame, u32 is_ip4)
@@ -574,6 +616,12 @@ upf_encap_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
                               GTPU_E_S_PN_BIT) != 0))
             vlib_buffer_advance (b3,
                                  -upf_buffer_opaque (b3)->gtpu.ext_hdr_len);
+
+	  /* If necessary, add space for GTPU PDU container ext. hdr. */
+	  advance_for_qfi (b0);
+	  advance_for_qfi (b1);
+	  advance_for_qfi (b2);
+	  advance_for_qfi (b3);
 
           /* Apply the rewrite string. $$$$ vnet_rewrite? */
           vlib_buffer_advance (b0, -(word) _vec_len (far0->forward.rewrite));
@@ -754,6 +802,11 @@ upf_encap_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
           gtpu3->ver_flags |=
             (upf_buffer_opaque (b3)->gtpu.hdr_flags & GTPU_E_S_PN_BIT);
 
+	  write_qfi (gtpu0, b0);
+	  write_qfi (gtpu1, b1);
+	  write_qfi (gtpu2, b2);
+	  write_qfi (gtpu3, b3);
+
           if (!is_ip4)
             {
               int bogus = 0;
@@ -878,6 +931,9 @@ upf_encap_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
           /* Apply the rewrite string. $$$$ vnet_rewrite? */
           vlib_buffer_advance (b0, -(word) _vec_len (far0->forward.rewrite));
 
+	  /* If necessary, add space for GTPU PDU container ext. hdr. */
+	  advance_for_qfi (b0);
+
           if (is_ip4)
             {
               ip4_0 = vlib_buffer_get_current (b0);
@@ -937,6 +993,8 @@ upf_encap_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
             sizeof (*udp0) - GTPU_V1_HDR_LEN);
           gtpu0->ver_flags |=
             (upf_buffer_opaque (b0)->gtpu.hdr_flags & GTPU_E_S_PN_BIT);
+
+          write_qfi (gtpu0, b0);
 
           if (!is_ip4)
             {

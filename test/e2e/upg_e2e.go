@@ -514,6 +514,193 @@ func describePDRReplacement(f *framework.Framework) {
 	})
 }
 
+var _ = ginkgo.Describe("QFI matching and insertion", func() {
+	describePDUSessContExtHdrQFI("IPv4", framework.UPGIPModeV4)
+	describePDUSessContExtHdrQFI("IPv6", framework.UPGIPModeV6)
+})
+
+func describePDUSessContExtHdrQFI(
+	title string, mode framework.UPGIPMode,
+) {
+	ginkgo.Describe(title, func() {
+		describePDUSessContExtHdrQFI1("UL QFI matching and DL QFI insertion provisioned", mode, true, true)
+		describePDUSessContExtHdrQFI1("no UL QFI matching and DL QFI insertion provisioned", mode, false, true)
+		describePDUSessContExtHdrQFI1("UL QFI matching and no DL QFI insertion provisioned", mode, true, false)
+	})
+
+}
+
+func describePDUSessContExtHdrQFI1(
+	title string, mode framework.UPGIPMode,
+	qfiULMatchingProvisioned bool,
+	qfiDLInsertionProvisioned bool,
+) {
+	ginkgo.Context(title, func() {
+		describePDUSessContExtHdrQFI2("1 ext. header has valid qfi",
+			mode, qfiULMatchingProvisioned, qfiDLInsertionProvisioned, false, 1)
+		describePDUSessContExtHdrQFI2("3 ext. headers has valid qfi",
+			mode, qfiULMatchingProvisioned, qfiDLInsertionProvisioned, false, 3)
+		describePDUSessContExtHdrQFI2("1 ext. header has invalid qfi",
+			mode, qfiULMatchingProvisioned, qfiDLInsertionProvisioned, true, 1)
+		describePDUSessContExtHdrQFI2("3 ext. headres has invalid qfi",
+			mode, qfiULMatchingProvisioned, qfiDLInsertionProvisioned, true, 3)
+		describePDUSessContExtHdrQFI2("no ext. headers",
+			mode, qfiULMatchingProvisioned, qfiDLInsertionProvisioned, false, 0)
+	})
+
+}
+
+func describePDUSessContExtHdrQFI2(
+	title string, mode framework.UPGIPMode,
+	qfiULMatchingProvisioned bool,
+	qfiDLInsertionProvisioned bool,
+	useInvalidQfi bool,
+	nExtHdrs uint,
+) {
+	var qfi uint8 = 5
+	var qfiUL uint8 = qfi
+	if useInvalidQfi {
+		qfiUL = qfi + 1
+	}
+
+	ginkgo.Context(title, func() {
+		f := framework.NewDefaultFramework(framework.UPGModePGW, mode)
+
+		f.TPDUHook = func(tpdu *gtpumessage.TPDU, fromPGW bool) {
+			defer ginkgo.GinkgoRecover()
+			if fromPGW && !qfiDLInsertionProvisioned {
+				// ext flag must be reset
+				framework.ExpectEqual((tpdu.Header.Flags>>2)&1, uint8(0))
+				return
+			}
+			if fromPGW && qfiDLInsertionProvisioned {
+				// ext flag should contain only the PDU
+				// extension bit
+				framework.ExpectEqual(
+					(tpdu.Header.Flags)&(7<<0),
+					uint8(1<<2))
+
+				// Payload[0:4] contains SQN, N-PDU number next
+				// ext. hdr. type. Rest of payload contains
+				// ext. headers
+				framework.ExpectEqual(
+					tpdu.Payload[3:8],
+					[]byte{
+						0x85, // next extension type (PDU Session Container)
+						1,    // ext header length
+						0,    // PDU CONT TYPE DL
+						qfi,  // ext content
+						0,    // No more ext. headers
+					})
+
+				// Strip the extension header
+				tpdu.Payload = tpdu.Payload[8:]
+				return
+			}
+
+			// Add an extension to T-PDU
+			// GTP library doesn't support extensions, so some hacks are needed
+			// TODO: fix the library
+			prepend := []byte{
+				0, // seq number hi (unused)
+				0, // seq number lo (unused)
+				0, // N-PDU number (unused)
+			}
+
+			if nExtHdrs > 0 {
+				extHdr := []byte{
+					0x85,   // next extension type (PDU Session Container)
+					1,      // ext header length
+					1 << 4, // PDU CONT TYPE UL
+					qfiUL,  // ext content: QFI
+				}
+				prepend = append(prepend, extHdr...)
+			}
+
+			for i := 1; i < int(nExtHdrs); i++ {
+				extHdr := []byte{
+					0x32, // next extension type
+					1,    // ext header length
+					0,    // ext content
+					0xff, // ext content
+				}
+				prepend = append(prepend, extHdr...)
+			}
+			prepend = append(prepend, 0) // next ext type: no extension
+
+			tpdu.Header.Flags |= 4
+			tpdu.Payload = append(prepend, tpdu.Payload...)
+		}
+
+		ginkgo.BeforeEach(func() {
+			ginkgo.By("Establishing a session")
+			cfg := framework.SessionConfig{}
+			cfg.IdBase = 1
+			cfg.UEIP = f.UEIP()
+			cfg.Mode = f.Mode
+			cfg.TEIDPGWs5u = framework.TEIDPGWs5u
+			cfg.TEIDSGWs5u = framework.TEIDSGWs5u
+			cfg.PGWIP = f.VPPCfg.GetVPPAddress("grx").IP
+			cfg.SGWIP = f.VPPCfg.GetNamespaceAddress("grx").IP
+			cfg.SkipSDFFilter = true
+
+			ieMatchQFI := ie.NewQFI(qfi)
+			ieQERID := ie.NewQERID(1)
+			ies := cfg.SessionIEs()
+			for _, pdr := range ies {
+				if pdr.Type != ie.CreatePDR {
+					continue
+				}
+				_, err := pdr.FindByType(ie.OuterHeaderRemoval)
+				if errors.Is(err, ie.ErrIENotFound) {
+					// This pdr is a DL pdr
+					if !qfiDLInsertionProvisioned {
+						continue
+					}
+					pdr.Add(ieQERID)
+				} else {
+					// This pdr is an UL pdr
+					if !qfiULMatchingProvisioned {
+						continue
+					}
+					framework.ExpectNoError(err)
+					pdi, err := pdr.FindByType(ie.PDI)
+					framework.ExpectNoError(err)
+					pdi.Add(ieMatchQFI)
+					pdr.Remove(ie.PDI)
+					pdr.Add(pdi)
+				}
+			}
+			if qfiDLInsertionProvisioned {
+				ies = append(ies, ie.NewCreateQER(
+					ieQERID, ie.NewGateStatus(0, 0),
+					ieMatchQFI))
+			}
+			_, err := f.PFCP.EstablishSession(f.Context, 0, ies...)
+			framework.ExpectNoError(err)
+		})
+
+		expect := framework.ExpectError
+		if qfiULMatchingProvisioned && nExtHdrs > 0 && !useInvalidQfi {
+			expect = framework.ExpectNoError
+		} else if !qfiULMatchingProvisioned {
+			expect = framework.ExpectNoError
+		}
+
+		ginkgo.It("in DL direction", func() {
+			tg, clientNS, serverNS := newReverseTrafficGen(
+				f, &traffic.HTTPConfig{}, &traffic.SimpleTrafficRec{})
+			expect(tg.Run(f.Context, clientNS, serverNS))
+		})
+
+		ginkgo.It("in UL direction", func() {
+			tg, clientNS, serverNS := newTrafficGen(
+				f, &traffic.HTTPConfig{}, &traffic.SimpleTrafficRec{})
+			expect(tg.Run(f.Context, clientNS, serverNS))
+		})
+	})
+}
+
 var _ = ginkgo.Describe("CLI debug commands", func() {
 	f := framework.NewDefaultFramework(framework.UPGModeTDF, framework.UPGIPModeV4)
 	ginkgo.Context("show upf session", func() {
@@ -2543,6 +2730,23 @@ func newTrafficGen(f *framework.Framework, cfg traffic.TrafficConfig, rec traffi
 		serverNS = f.VPP.GetNS("srv")
 	} else {
 		serverNS = f.VPP.GetNS("sgi")
+	}
+	return traffic.NewTrafficGen(cfg, rec), clientNS, serverNS
+}
+
+func newReverseTrafficGen(f *framework.Framework, cfg traffic.TrafficConfig, rec traffic.TrafficRec) (*traffic.TrafficGen, *network.NetNS, *network.NetNS) {
+	ginkgo.By("starting the reverse traffic generator")
+	// Here, UE is the server
+	cfg.SetNoLinger(true)
+	if !cfg.HasServerIP() {
+		cfg.AddServerIP(f.UEIP())
+	}
+	serverNS := f.VPP.GetNS("ue")
+	var clientNS *network.NetNS
+	if f.Mode == framework.UPGModeGTPProxy {
+		clientNS = f.VPP.GetNS("srv")
+	} else {
+		clientNS = f.VPP.GetNS("sgi")
 	}
 	return traffic.NewTrafficGen(cfg, rec), clientNS, serverNS
 }

@@ -140,7 +140,7 @@ acl_port_in_range (const u16 port, upf_acl_t *acl, int field)
 }
 
 always_inline int
-upf_acl_classify_one (vlib_main_t *vm, u32 teid, flow_entry_t *flow,
+upf_acl_classify_one (vlib_main_t *vm, u32 teid, flow_entry_t *flow, u8 qfi,
                       flow_direction_t direction, u8 is_ip4, upf_acl_t *acl,
                       struct rules *active)
 {
@@ -157,6 +157,8 @@ upf_acl_classify_one (vlib_main_t *vm, u32 teid, flow_entry_t *flow,
       if (teid != acl->teid)
         return 0;
     }
+  if (acl->qfi != (u8)~0 && qfi != acl->qfi)
+    return 0;
 
   switch (acl->match_ue_ip)
     {
@@ -221,7 +223,7 @@ upf_acl_classify_one (vlib_main_t *vm, u32 teid, flow_entry_t *flow,
 }
 
 always_inline u32
-upf_acl_classify_forward (vlib_main_t *vm, u32 teid, flow_entry_t *flow,
+upf_acl_classify_forward (vlib_main_t *vm, u32 teid, u8 qfi, flow_entry_t *flow,
                           struct rules *active, u8 is_ip4, u32 *pdr_idx)
 {
   u32 next = UPF_CLASSIFY_NEXT_DROP;
@@ -269,7 +271,7 @@ upf_acl_classify_forward (vlib_main_t *vm, u32 teid, flow_entry_t *flow,
   vec_foreach (acl, acl_vec)
     {
       upf_debug ("%d forward acl pdr %d", acl - acl_vec, acl->pdr_idx);
-      if (upf_acl_classify_one (vm, teid, flow, FT_ORIGIN, is_ip4, acl,
+      if (upf_acl_classify_one (vm, teid, flow, qfi, FT_ORIGIN, is_ip4, acl,
                                 active))
         {
           upf_pdr_t *pdr;
@@ -329,7 +331,7 @@ upf_acl_classify_forward (vlib_main_t *vm, u32 teid, flow_entry_t *flow,
 
 /* Classify traffic from the proxy towards the UE */
 always_inline u32
-upf_acl_classify_proxied (vlib_main_t *vm, u32 teid, flow_entry_t *flow,
+upf_acl_classify_proxied (vlib_main_t *vm, u32 teid, u8 qfi, flow_entry_t *flow,
                           struct rules *active, u8 is_ip4, u32 *pdr_idx)
 {
   u32 next = UPF_CLASSIFY_NEXT_DROP;
@@ -347,7 +349,7 @@ upf_acl_classify_proxied (vlib_main_t *vm, u32 teid, flow_entry_t *flow,
   vec_foreach (acl, acl_vec)
     {
       upf_debug ("%d proxied acl pdr %d", acl - acl_vec, acl->pdr_idx);
-      if (upf_acl_classify_one (vm, teid, flow, FT_REVERSE, is_ip4, acl,
+      if (upf_acl_classify_one (vm, teid, flow, qfi, FT_REVERSE, is_ip4, acl,
                                 active))
         {
           upf_pdr_t *pdr;
@@ -376,7 +378,7 @@ upf_acl_classify_proxied (vlib_main_t *vm, u32 teid, flow_entry_t *flow,
 }
 
 always_inline u32
-upf_acl_classify_return (vlib_main_t *vm, u32 teid, flow_entry_t *flow,
+upf_acl_classify_return (vlib_main_t *vm, u32 teid, u8 qfi, flow_entry_t *flow,
                          struct rules *active, u8 is_ip4, u32 *pdr_idx)
 {
   u32 next = UPF_CLASSIFY_NEXT_DROP;
@@ -394,7 +396,7 @@ upf_acl_classify_return (vlib_main_t *vm, u32 teid, flow_entry_t *flow,
   vec_foreach (acl, acl_vec)
     {
       upf_debug ("%d return acl pdr %d", acl - acl_vec, acl->pdr_idx);
-      if (upf_acl_classify_one (vm, teid, flow, FT_REVERSE, is_ip4, acl,
+      if (upf_acl_classify_one (vm, teid, flow, qfi, FT_REVERSE, is_ip4, acl,
                                 active))
         {
           upf_pdr_t *pdr;
@@ -454,6 +456,7 @@ upf_classify_fn (vlib_main_t *vm, vlib_node_runtime_t *node,
       u32 n_left_to_next;
       vlib_buffer_t *b;
       flow_entry_t *flow;
+      u8 qfi = ~0;
       flow_direction_t direction;
       u32 bi;
       u8 reclassify_proxy_flow;
@@ -501,6 +504,9 @@ upf_classify_fn (vlib_main_t *vm, vlib_node_runtime_t *node,
                        "FTD_OP_FLIP",
                      direction == FT_ORIGIN ? "FT_ORIGIN" : "FT_REVERSE");
 
+          if (upf_buffer_opaque (b)->gtpu.qfi_hdr_present)
+            qfi = upf_buffer_opaque (b)->gtpu.qfi;
+
           if (flow_side (flow, direction)->next != FT_NEXT_CLASSIFY)
             {
               /* we shouldn't be here, this can happend when multiple
@@ -519,27 +525,27 @@ upf_classify_fn (vlib_main_t *vm, vlib_node_runtime_t *node,
           else if (direction == FT_ORIGIN)
             {
               next = upf_acl_classify_forward (
-                vm, upf_buffer_opaque (b)->gtpu.teid, flow, active, is_ip4,
+                vm, upf_buffer_opaque (b)->gtpu.teid, qfi, flow, active, is_ip4,
                 &upf_buffer_opaque (b)->gtpu.pdr_idx);
               if (reclassify_proxy_flow) /* for app detection */
                 {
                   if (upf_buffer_opaque (b)->gtpu.is_proxied)
-                    upf_acl_classify_proxied (vm, 0, flow, active, is_ip4, 0);
+                    upf_acl_classify_proxied (vm, 0, ~0, flow, active, is_ip4, 0);
                   else
-                    upf_acl_classify_return (vm, 0, flow, active, is_ip4, 0);
+                    upf_acl_classify_return (vm, 0, ~0, flow, active, is_ip4, 0);
                 }
             }
           else
             {
               if (reclassify_proxy_flow) /* for app detection */
-                upf_acl_classify_forward (vm, 0, flow, active, is_ip4, 0);
+                upf_acl_classify_forward (vm, 0, ~0, flow, active, is_ip4, 0);
               if (upf_buffer_opaque (b)->gtpu.is_proxied)
                 next = upf_acl_classify_proxied (
-                  vm, upf_buffer_opaque (b)->gtpu.teid, flow, active, is_ip4,
+                  vm, upf_buffer_opaque (b)->gtpu.teid, qfi, flow, active, is_ip4,
                   &upf_buffer_opaque (b)->gtpu.pdr_idx);
               else
                 next = upf_acl_classify_return (
-                  vm, upf_buffer_opaque (b)->gtpu.teid, flow, active, is_ip4,
+                  vm, upf_buffer_opaque (b)->gtpu.teid, qfi, flow, active, is_ip4,
                   &upf_buffer_opaque (b)->gtpu.pdr_idx);
             }
 

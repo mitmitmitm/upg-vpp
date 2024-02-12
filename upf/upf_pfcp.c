@@ -961,6 +961,7 @@ pfcp_free_pdr (upf_pdr_t *pdr)
 {
   upf_adf_put_adr_db (pdr->pdi.adr.db_id);
   vec_free (pdr->pdi.acl);
+  vec_free (pdr->pdi.qfis);
   vec_free (pdr->urr_ids);
   vec_free (pdr->qer_ids);
 }
@@ -984,6 +985,7 @@ pfcp_make_pending_pdr (upf_session_t *sx)
           upf_pdr_t *pdr = vec_elt_at_index (pending->pdr, i);
 
           pdr->pdi.acl = vec_dup (vec_elt (active->pdr, i).pdi.acl);
+          pdr->pdi.qfis = vec_dup (vec_elt (active->pdr, i).pdi.qfis);
           pdr->urr_ids = vec_dup (vec_elt (active->pdr, i).urr_ids);
           pdr->qer_ids = vec_dup (vec_elt (active->pdr, i).qer_ids);
         }
@@ -1694,6 +1696,20 @@ ip4_address_mask_from_width (ip4_address_t *a, u32 width)
 }
 
 always_inline void
+compile_qfi (const upf_pdr_t * pdr, upf_acl_t * acl)
+{
+  if (!vec_len (pdr->pdi.qfis))
+    {
+      acl->qfi = ~0;
+      return;
+    }
+
+  /* TODO: Match against multiple possible QFIs, perhaps with multiple ACL
+     rules. */
+  acl->qfi = pdr->pdi.qfis[0];
+}
+
+always_inline void
 compile_teid (const upf_pdr_t *pdr, upf_acl_t *acl)
 {
   if (!(pdr->pdi.fields & F_PDI_LOCAL_F_TEID))
@@ -1826,6 +1842,7 @@ compile_pdi (int is_ip4, const upf_pdr_t *pdr, const acl_rule_t *rule,
   acl->pdr_idx = pdr_idx;
 
   compile_teid (pdr, acl);
+  compile_qfi (pdr, acl);
   compile_sdf (is_ip4, pdr, rule, acl);
   compile_ue_ip (is_ip4, pdr, acl);
 
@@ -2810,14 +2827,20 @@ process_qers (vlib_main_t *vm, upf_session_t *sess, struct rules *r,
       if (!qer)
         continue;
 
-      if (!(qer->flags & PFCP_QER_MBR))
-        continue;
+      if (qer->qfi != (u8)~0)
+        {
+          upf_buffer_opaque (b)->gtpu.qfi_present = 1;
+          upf_buffer_opaque (b)->gtpu.qfi = GTPU_PDU_CONT_QFI_MASK & qer->qfi;
+        }
 
       if (qer->gate_status[direction])
         {
           ret = false;
           break;
         }
+
+      if (!(qer->flags & PFCP_QER_MBR))
+        continue;
 
       pol = pool_elt_at_index (gtm->qer_policers, qer->policer.value);
       col = vnet_police_packet (&pol->policer[direction], len, POLICE_CONFORM,

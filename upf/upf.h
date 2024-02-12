@@ -106,6 +106,22 @@ typedef CLIB_PACKED (struct
 }) gtpu_ext_header_t;
 /* clang-format on */
 
+#define GTPU_EXT_H_TYPE_PDU_CONT 0x85
+
+/* *clang-format off* */
+typedef CLIB_PACKED (struct
+{
+  u8 len;
+#define GTPU_PDU_CONT_TYPE_MASK ((1<<4 - 1) << 4)
+#define GTPU_PDU_CONT_TYPE_DL 0
+#define GTPU_PDU_CONT_TYPE_UL (1<<4)
+  u8 pdu_type;
+#define GTPU_PDU_CONT_QFI_MASK ((1<<6) - 1)
+  u8 qfi;
+  u8 next_ext_type;
+}) gtpu_ext_pdu_container_t;
+/* *clang-format on* */
+
 /* clang-format off */
 typedef CLIB_PACKED (struct
 {
@@ -360,6 +376,7 @@ typedef struct
 
   u32 fib_index;
   u32 teid;             // TEID
+  u8 qfi;
   ip46_address_t ue_ip; // UE-IP
 
   /* SDF */
@@ -389,6 +406,9 @@ typedef struct
 
   pfcp_ie_f_teid_t teid;
   pfcp_ie_ue_ip_address_t ue_addr;
+  /* Array of allowed QFI's. If non-empty, GTPU packet's QFI must match one of
+     the elemets. */
+  u8 *qfis;
   acl_rule_t *acl;
   adr_rule_t adr;
 } upf_pdi_t;
@@ -658,6 +678,7 @@ typedef struct
   u8 gate_status[UPF_DIRECTION_MAX];
 
   pfcp_ie_mbr_t mbr;
+  u8 qfi;
   clib_bihash_kv_8_8_t policer;
 } upf_qer_t;
 
